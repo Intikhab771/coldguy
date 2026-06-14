@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* You can also move your brutalist CSS from App.vue here if you want it applied globally */
+body { 
+  background-color: #f9f9f9; 
+  color: #1a1c1c; 
+  overflow-x: hidden; 
+  cursor: crosshair !important; 
+}
+/* ... rest of your custom styles ... */
