@@ -35,8 +35,10 @@ class ScrapeRequest(BaseModel):
 # --- THE SERVER'S MEMORY ---
 GLOBAL_STATE = {
     "is_auto_mode": False,
-    "frequency": 60,       # Default 60 seconds
-    "saved_campaign": []   # Holds the emails & attachments for the loop
+    "frequency": 60,       
+    "saved_campaign": [],  
+    "emails_sent": 0,       
+    "total_target": 1       
 }
 
 # 1. THE CHEF
@@ -44,6 +46,13 @@ async def email_worker():
     print("👷 Chef Online: Waiting for tasks...")
     while True:
         order = await queue.get()
+        
+        # Guard: Ensure we don't cook if target is already hit
+        if GLOBAL_STATE["emails_sent"] >= GLOBAL_STATE["total_target"]:
+            GLOBAL_STATE["is_auto_mode"] = False
+            queue.task_done()
+            continue
+            
         target = order['target_email']
         print(f"🍳 Cooking Email to {target}...")
         
@@ -54,7 +63,6 @@ async def email_worker():
             msg["From"] = os.getenv("SENDER_EMAIL")
             msg["To"] = target
             
-            # Loop through multiple attachments if they exist
             if order.get('attachments'):
                 for att in order['attachments']:
                     ctype, encoding = mimetypes.guess_type(att['filename'])
@@ -66,39 +74,61 @@ async def email_worker():
                         att['bytes'], maintype=maintype, subtype=subtype, filename=att['filename']
                     )
 
+            # Await the actual delivery handshake from the SMTP server
             await aiosmtplib.send(
                 msg, hostname="smtp.gmail.com", port=465, use_tls=True,
                 username=os.getenv("SENDER_EMAIL"), password=os.getenv("SENDER_PASSWORD")
             )
-            print(f"✅ Delivered to {target}")
+            print(f"✅ Delivered to {target} SMTP Server")
+            
+            # THE TOLERANCE: Slight delay to sync counter strictly with recipient inbox processing
+            await asyncio.sleep(1.5)
+            
+            GLOBAL_STATE["emails_sent"] += 1 
+            
+            # Post-send guard: Stop clock if we just hit the target
+            if GLOBAL_STATE["emails_sent"] >= GLOBAL_STATE["total_target"]:
+                GLOBAL_STATE["is_auto_mode"] = False
+                print("🎯 Target reached! Auto-campaign terminated.")
+                
         except Exception as e:
             print(f"❌ Error sending to {target}: {e}")
         finally:
             queue.task_done()
 
-# 2. THE CLOCK (The Automator)
+# 2. THE CLOCK (Upgraded to 1-Second Ticks for Dynamic Syncing)
 async def campaign_scheduler():
     print("⏰ Automation Clock Online...")
+    time_elapsed = 0
     while True:
-        # If auto mode is ON, and we have saved emails
         if GLOBAL_STATE["is_auto_mode"] and GLOBAL_STATE["saved_campaign"]:
-            print(f"⏳ CLOCK TRIGGERED! Injecting {len(GLOBAL_STATE['saved_campaign'])} emails into the queue.")
-            
-            # Dump a copy of the saved emails into the Chef's queue
-            for order in GLOBAL_STATE["saved_campaign"]:
-                await queue.put(order)
-            
-            # Go to sleep until the next frequency cycle
-            await asyncio.sleep(GLOBAL_STATE["frequency"])
+            # Auto-kill if target was reached externally
+            if GLOBAL_STATE["emails_sent"] >= GLOBAL_STATE["total_target"]:
+                GLOBAL_STATE["is_auto_mode"] = False
+                time_elapsed = 0
+                await asyncio.sleep(1)
+                continue
+
+            # Trigger only when elapsed time catches up to the CURRENT dynamic frequency
+            if time_elapsed >= GLOBAL_STATE["frequency"]:
+                print(f"⏳ CLOCK TRIGGERED! Injecting emails into the queue.")
+                for order in GLOBAL_STATE["saved_campaign"]:
+                    # Prevent over-queueing beyond the target
+                    if GLOBAL_STATE["emails_sent"] + queue.qsize() < GLOBAL_STATE["total_target"]:
+                        await queue.put(order)
+                time_elapsed = 0
+            else:
+                time_elapsed += 1
+                await asyncio.sleep(1)
         else:
-            # If auto is OFF, just wait 3 seconds and check again
-            await asyncio.sleep(3)
+            time_elapsed = 0
+            await asyncio.sleep(1)
 
 # 3. STARTUP MANAGER
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     worker_task = asyncio.create_task(email_worker())
-    scheduler_task = asyncio.create_task(campaign_scheduler()) # Turn the clock on!
+    scheduler_task = asyncio.create_task(campaign_scheduler())
     yield 
     worker_task.cancel()
     scheduler_task.cancel()
@@ -109,17 +139,37 @@ app.add_middleware(
     CORSMiddleware, allow_origins=["*"], allow_credentials=False, allow_methods=["*"], allow_headers=["*"]
 )
 
-# 4. THE WAITER (Upgraded for Settings and Multiple Files)
+# --- NEW: LIVE FREQUENCY UPDATE ENDPOINT ---
+@app.post("/api/update-frequency")
+async def update_frequency(frequency: int = Form(...)):
+    GLOBAL_STATE["frequency"] = frequency
+    print(f"🎚️ Live Frequency Update: {frequency}s")
+    return {"status": "Success", "frequency": GLOBAL_STATE["frequency"]}
+
+# --- STATUS ENDPOINT ---
+@app.get("/api/campaign-status")
+async def get_campaign_status():
+    return {
+        "emails_sent": GLOBAL_STATE["emails_sent"],
+        "total_target": GLOBAL_STATE["total_target"],
+        "is_auto_mode": GLOBAL_STATE["is_auto_mode"]
+    }
+
+# 4. THE WAITER
 @app.post("/api/send-bulk")
 async def handle_bulk_campaign(
     campaign_data: str = Form(...),
-    is_auto_mode: str = Form("false"),  # Catch the toggle switch
-    frequency: int = Form(60),          # Catch the timer
-    attachments: list[UploadFile] = File([]) # Accept a list of files
+    is_auto_mode: str = Form("false"),  
+    frequency: int = Form(60),
+    total_target: int = Form(1),
+    attachments: list[UploadFile] = File([]) 
 ):
     email_orders = json.loads(campaign_data)
     
-    # Process all incoming files into memory
+    # Reset tracking
+    GLOBAL_STATE["emails_sent"] = 0
+    GLOBAL_STATE["total_target"] = total_target
+    
     file_data_list = []
     for file in attachments:
         file_bytes = await file.read()
@@ -131,28 +181,24 @@ async def handle_bulk_campaign(
     for order in email_orders:
         order['attachments'] = file_data_list
         
-    # LOGIC: Check what the user wants to do
     if is_auto_mode == "true":
-        # Save to memory and turn the clock ON
         GLOBAL_STATE["is_auto_mode"] = True
         GLOBAL_STATE["frequency"] = frequency
         GLOBAL_STATE["saved_campaign"] = email_orders
         return {"status": "Success", "message": f"🤖 Auto-Mode Started! Firing every {frequency} seconds."}
     else:
-        # Turn the clock OFF and just send them immediately
         GLOBAL_STATE["is_auto_mode"] = False
         for order in email_orders:
-            await queue.put(order)
+            # Ensure even manual sends respect the cap
+            if GLOBAL_STATE["emails_sent"] + queue.qsize() < GLOBAL_STATE["total_target"]:
+                await queue.put(order)
         return {"status": "Success", "message": "📤 Sent manually once!"}
 
 @app.post("/api/stop-auto")
 async def stop_automation():
     print("🛑 Waiter received STOP command! Killing the clock.")
-    
-    # Wipe the server's memory
     GLOBAL_STATE["is_auto_mode"] = False
     GLOBAL_STATE["saved_campaign"] = []
-    
     return {"status": "Success", "message": "🛑 Automation successfully stopped!"}
 
 @app.post("/api/generate-email")

@@ -461,7 +461,29 @@
 </label>
 </div>
 </div>
-<div class="flex-1 p-gutter flex flex-col gap-6">
+<div class="mt-4 p-6 bg-surface brutal-border brutal-shadow flex flex-col gap-4">
+<h3 class="font-headline-md text-headline-md font-extrabold uppercase text-on-surface">CAMPAIGN PROGRESS</h3>
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+<!-- Total Target Counter -->
+<div class="flex flex-col gap-2">
+<label class="font-label-bold text-label-bold uppercase bg-on-surface text-surface px-2 py-1 inline-block w-max brutal-border">TOTAL TARGET</label>
+<div class="flex items-center gap-4 bg-surface-container-low brutal-border p-4 brutal-shadow-sm">
+<button class="w-12 h-12 bg-primary text-on-primary brutal-border brutal-shadow brutal-button flex items-center justify-center font-black text-2xl" onclick="this.nextElementSibling.innerText = Math.max(0, parseInt(this.nextElementSibling.innerText) - 10)"> - </button>
+<span class="flex-1 text-center font-headline-md text-headline-md font-black" id="target-count-display">150</span>
+<button class="w-12 h-12 bg-primary text-on-primary brutal-border brutal-shadow brutal-button flex items-center justify-center font-black text-2xl" onclick="this.previousElementSibling.innerText = parseInt(this.previousElementSibling.innerText) + 10"> + </button>
+</div>
+</div>
+<!-- Emails Sent Status -->
+<div class="flex flex-col gap-2">
+<label class="font-label-bold text-label-bold uppercase bg-on-surface text-surface px-2 py-1 inline-block w-max brutal-border">EMAILS SENT</label>
+<div class="flex items-center justify-center bg-secondary-container brutal-border p-4 brutal-shadow-sm h-full">
+<div class="font-headline-md text-headline-md font-black text-on-secondary-container">
+                    0 / <span id="target-status-sync">150</span>
+</div>
+</div>
+</div>
+</div>
+</div><div class="flex-1 p-gutter flex flex-col gap-6">
 <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 <div class="flex flex-col gap-2">
 <label class="font-label-bold text-label-bold uppercase bg-on-surface text-surface px-2 py-1 inline-block w-max brutal-border">TARGET EMAIL</label>

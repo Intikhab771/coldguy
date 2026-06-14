@@ -1,11 +1,16 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 
 // --- CORE APP STATE ---
 const emailList = ref([{ target_email: '', subject: '', body: '' }])
 const isAutoMode = ref(false)
 const frequencySeconds = ref(150)
 const aiGlitchActive = ref(false)
+
+// --- CAMPAIGN TRACKER STATE ---
+const totalTarget = ref(1) // Default strictly set to 1
+const emailsSent = ref(0)
+let statusInterval: ReturnType<typeof setInterval> | null = null
 
 // --- ATTACHMENT STATE ---
 const selectedFiles = ref<File[]>([])
@@ -23,6 +28,48 @@ const userLinks = ref("github.com/coldguy")
 const isSending = ref(false)
 const sendBtnText = ref('SEND CAMPAIGN')
 const loaderFrames = ['[=     ]', '[==    ]', '[===   ]', '[ ===  ]', '[  === ]', '[   ===]', '[    ==]', '[     =]', '[    ==]', '[   ===]', '[  === ]', '[ ===  ]', '[===   ]', '[==    ]']
+
+// --- COUNTER LOGIC (Least Count = 1 Constraint) ---
+const decreaseTarget = () => {
+  totalTarget.value = Math.max(1, totalTarget.value - 1)
+}
+
+const increaseTarget = () => {
+  totalTarget.value += 1
+}
+
+// --- SYNC LIVE FREQUENCY TO BACKEND ---
+const pushFrequencyToBackend = async () => {
+  const fd = new FormData()
+  fd.append('frequency', frequencySeconds.value.toString())
+  try {
+    await fetch('http://127.0.0.1:8000/api/update-frequency', { method: 'POST', body: fd })
+  } catch (error) {
+    console.error("Failed to push live frequency change.", error)
+  }
+}
+
+// --- SYNC STATUS FROM BACKEND ---
+const fetchStatus = async () => {
+  try {
+    const res = await fetch('http://127.0.0.1:8000/api/campaign-status')
+    if (res.ok) {
+      const data = await res.json()
+      emailsSent.value = data.emails_sent
+    }
+  } catch (error) {
+    console.error("Tracker sync failed. Backend might be down.")
+  }
+}
+
+onMounted(() => {
+  // Sped up polling to 1s so the UI catches the tolerance delay precisely
+  statusInterval = setInterval(fetchStatus, 1000)
+})
+
+onUnmounted(() => {
+  if (statusInterval) clearInterval(statusInterval)
+})
 
 // --- THE AI GENERATOR FUNCTION ---
 const generateAIEmail = async () => {
@@ -93,6 +140,7 @@ const startCampaign = async () => {
   formData.append('campaign_data', JSON.stringify(emailList.value))
   formData.append('is_auto_mode', isAutoMode.value.toString())
   formData.append('frequency', frequencySeconds.value.toString())
+  formData.append('total_target', totalTarget.value.toString())
   
   selectedFiles.value.forEach(file => {
     formData.append('attachments', file)
@@ -103,6 +151,9 @@ const startCampaign = async () => {
     
     clearInterval(animInterval)
     sendBtnText.value = "[OK] SENT"
+    
+    // Resync immediately
+    await fetchStatus()
     
     setTimeout(() => {
       sendBtnText.value = "SEND CAMPAIGN"
@@ -246,7 +297,7 @@ const handleAiToggle = async () => {
       </section>
 
       <section class="flex-1 min-w-[600px] flex flex-col z-10 bg-background overflow-y-auto h-screen">
-        <div class="p-gutter brutal-border-b bg-secondary-container flex flex-wrap justify-between items-center gap-4">
+        <div class="p-gutter brutal-border-b bg-secondary-container flex flex-wrap justify-between items-center gap-4 shrink-0">
           <div>
             <h2 class="font-headline-md text-headline-md font-extrabold uppercase text-on-secondary-container mb-1">Campaign Architect</h2>
             <p class="font-code-sm text-code-sm text-on-secondary-container font-bold">MODE: AGGRESSIVE_OUTBOUND</p>
@@ -262,6 +313,31 @@ const handleAiToggle = async () => {
                 <div class="hard-toggle-handle"></div>
               </div>
             </label>
+          </div>
+        </div>
+
+        <div class="mt-6 mx-6 p-6 bg-surface brutal-border brutal-shadow flex flex-col gap-4 shrink-0">
+          <h3 class="font-headline-md text-headline-md font-extrabold uppercase text-on-surface">CAMPAIGN PROGRESS</h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+            
+            <div class="flex flex-col gap-2">
+              <label class="font-label-bold text-label-bold uppercase bg-on-surface text-surface px-2 py-1 inline-block w-max brutal-border">TOTAL TARGET</label>
+              <div class="flex items-center gap-4 bg-surface-container-low brutal-border p-4 brutal-shadow-sm">
+                <button @click="decreaseTarget" class="w-12 h-12 bg-primary text-on-primary brutal-border brutal-shadow brutal-button flex items-center justify-center font-black text-2xl"> - </button>
+                <span class="flex-1 text-center font-headline-md text-headline-md font-black">{{ totalTarget }}</span>
+                <button @click="increaseTarget" class="w-12 h-12 bg-primary text-on-primary brutal-border brutal-shadow brutal-button flex items-center justify-center font-black text-2xl"> + </button>
+              </div>
+            </div>
+            
+            <div class="flex flex-col gap-2">
+              <label class="font-label-bold text-label-bold uppercase bg-on-surface text-surface px-2 py-1 inline-block w-max brutal-border">EMAILS SENT</label>
+              <div class="flex items-center justify-center bg-secondary-container brutal-border p-4 brutal-shadow-sm h-full">
+                <div class="font-headline-md text-headline-md font-black text-on-secondary-container">
+                  {{ emailsSent }} / <span>{{ totalTarget }}</span>
+                </div>
+              </div>
+            </div>
+            
           </div>
         </div>
 
@@ -329,7 +405,9 @@ const handleAiToggle = async () => {
                 <label class="font-label-bold text-label-bold uppercase text-on-surface">SEND RATE / FREQUENCY</label>
                 <span class="font-code-sm text-code-sm bg-surface brutal-border px-2 py-1 font-bold">{{ frequencySeconds }}s</span>
               </div>
-              <input v-model="frequencySeconds" class="w-full h-3 bg-surface-dim brutal-border appearance-none cursor-pointer accent-primary" max="500" min="10" type="range"/>
+              
+              <input v-model="frequencySeconds" @change="pushFrequencyToBackend" class="w-full h-3 bg-surface-dim brutal-border appearance-none cursor-pointer accent-primary" max="500" min="10" type="range"/>
+              
               <div class="flex justify-between font-code-sm text-code-sm text-tertiary">
                 <span>Safe</span>
                 <span>Aggressive</span>
@@ -362,6 +440,7 @@ a, button, input, textarea, label { cursor: crosshair !important; }
 
 /* Specific Brutalist utilities */
 .brutal-shadow { box-shadow: 4px 4px 0px 0px #1a1c1c; }
+.brutal-shadow-sm { box-shadow: 2px 2px 0px 0px #1a1c1c; }
 .brutal-shadow-lg { box-shadow: 8px 8px 0px 0px #1a1c1c; }
 .brutal-border { border: 3px solid #1a1c1c; }
 .brutal-border-b { border-bottom: 3px solid #1a1c1c; }
