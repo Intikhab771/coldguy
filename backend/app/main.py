@@ -273,7 +273,7 @@ async def scrape_job_description(request: ScrapeRequest):
             browser = await p.chromium.launch(headless=True)
             page = await browser.new_page()
             
-            await page.goto(request.url, wait_until="domcontentloaded", timeout=15000)
+            await page.goto(request.url, wait_until="domcontentloaded", timeout=60000)
             raw_text = await page.evaluate("document.body.innerText")
             await browser.close()
             
@@ -305,7 +305,14 @@ async def scrape_job_description(request: ScrapeRequest):
         if not response.text:
             raise ValueError("AI returned empty data.")
             
-        extracted_data = json.loads(response.text)
+        raw_json_data = json.loads(response.text)
+        
+        # --- THE FIX: Handle cases where the AI wraps the JSON in an array ---
+        if isinstance(raw_json_data, list):
+            extracted_data = raw_json_data[0] if len(raw_json_data) > 0 else {}
+        else:
+            extracted_data = raw_json_data
+            
         print(f"✅ Successfully scraped and parsed: {extracted_data.get('company_name', 'Unknown')}")
         
         return {"status": "Success", "data": extracted_data}

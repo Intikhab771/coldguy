@@ -38,33 +38,46 @@ const increaseTarget = () => {
   totalTarget.value += 1
 }
 
+// --- FETCH STATUS FROM BACKEND ---
+const fetchStatus = async () => {
+  try {
+    const response = await fetch('http://127.0.0.1:8000/api/campaign-status')
+    const data = await response.json()
+    if (data.emails_sent !== undefined) {
+      emailsSent.value = data.emails_sent
+    }
+  } catch (error) {
+    console.error("Failed to fetch status.", error)
+  }
+}
+
+// --- DYNAMIC POLLING LOGIC ---
+const updatePollingInterval = () => {
+  // Clear the old clock if it exists
+  if (statusInterval) clearInterval(statusInterval)
+  
+  // Set the new clock to match the slider exactly (converted to milliseconds)
+  statusInterval = setInterval(fetchStatus, frequencySeconds.value * 1000)
+}
+
 // --- SYNC LIVE FREQUENCY TO BACKEND ---
 const pushFrequencyToBackend = async () => {
   const fd = new FormData()
   fd.append('frequency', frequencySeconds.value.toString())
   try {
     await fetch('http://127.0.0.1:8000/api/update-frequency', { method: 'POST', body: fd })
+    
+    // Manually tune the UI counter updation rate to the new slider value
+    updatePollingInterval()
+    
   } catch (error) {
     console.error("Failed to push live frequency change.", error)
   }
 }
 
-// --- SYNC STATUS FROM BACKEND ---
-const fetchStatus = async () => {
-  try {
-    const res = await fetch('http://127.0.0.1:8000/api/campaign-status')
-    if (res.ok) {
-      const data = await res.json()
-      emailsSent.value = data.emails_sent
-    }
-  } catch (error) {
-    console.error("Tracker sync failed. Backend might be down.")
-  }
-}
-
 onMounted(() => {
-  // Sped up polling to 1s so the UI catches the tolerance delay precisely
-  statusInterval = setInterval(fetchStatus, 1000)
+  // Initialize polling synced to the slider's default value instead of a hardcoded 1 second
+  updatePollingInterval()
 })
 
 onUnmounted(() => {
@@ -124,9 +137,20 @@ const removeFile = (index: number) => {
     fileInput.value.value = '' 
   }
 }
-
-// --- THE SEND CAMPAIGN FUNCTION ---
+  
+  // --- THE SEND CAMPAIGN FUNCTION ---
 const startCampaign = async () => {
+  // FIX: Safety Guard to prevent sending error messages to clients
+  const currentSubject = emailList.value[0].subject;
+  if (
+    currentSubject === "AI ERROR" || 
+    currentSubject === "ANALYZING TARGET..." || 
+    currentSubject === "CONNECTION FAILED"
+  ) {
+    alert("🛑 Cannot send campaign! Please ensure the AI successfully generates the email first.");
+    return; // Stops the function dead in its tracks
+  }
+
   if (isSending.value) return
   isSending.value = true
   
@@ -183,6 +207,85 @@ const handleAiToggle = async () => {
     await generateAIEmail()
   }
 }
+
+// --- SCRAPER & LEAD STATE ---
+const scrapeUrl = ref('')
+const isScraping = ref(false)
+
+const hotJobs = ref([
+  {
+    id: 'ENG-04',
+    job_title: 'Senior UI Dev',
+    company_name: 'Fintech Stealth Startup',
+    job_description: 'Looking for a senior developer experienced in building highly responsive, async frontends.',
+    target_email: '',
+    match_score: 94,
+    status_label: 'URGENT',
+    status_color: 'bg-primary text-on-primary'
+  },
+  {
+    id: 'MKT-12',
+    job_title: 'Growth Hacker',
+    company_name: 'SaaS Scale-up (B2B)',
+    job_description: 'Need an aggressive outbound specialist to scale our cold email campaigns.',
+    target_email: '',
+    match_score: 88,
+    status_label: 'NEW',
+    status_color: 'bg-surface-dim text-on-surface'
+  }
+])
+
+// --- SCRAPE ACTION ---
+const triggerScrape = async () => {
+  if (!scrapeUrl.value) return;
+  isScraping.value = true;
+  
+  try {
+    const response = await fetch('http://127.0.0.1:8000/api/scrape', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url: scrapeUrl.value })
+    });
+    
+    const data = await response.json();
+    
+    if (data.status === "Success") {
+      // Unshift pushes the new job to the top of the Hot Jobs list
+      hotJobs.value.unshift({
+        id: `SCR-${Math.floor(Math.random() * 999)}`,
+        job_title: data.data.job_title || 'Unknown Role',
+        company_name: data.data.company_name || 'Unknown Company',
+        job_description: data.data.job_description || 'No description found.',
+        target_email: data.data.target_email || '',
+        match_score: Math.floor(Math.random() * 15) + 85, // Generates a random high score
+        status_label: 'SCRAPED',
+        status_color: 'bg-secondary text-on-secondary'
+      });
+      scrapeUrl.value = ''; // Clear input
+    } else {
+      alert(`Scraper Error: ${data.message}`);
+    }
+  } catch (error) {
+    console.error("Scraping failed", error);
+    alert("Connection to scraper failed. Is the backend running?");
+  } finally {
+    isScraping.value = false;
+  }
+}
+
+// --- LOAD LEAD ACTION ---
+const loadLeadToForm = (job: any) => {
+  jobTitle.value = job.job_title;
+  companyName.value = job.company_name;
+  jobDescription.value = job.job_description;
+  
+  // Only override email if the scraper found one
+  if (job.target_email) {
+    emailList.value[0].target_email = job.target_email;
+  }
+  
+  triggerAiGlitch(); // Add visual flair when loading
+}
 </script>
 
 <template>
@@ -236,59 +339,65 @@ const handleAiToggle = async () => {
       <div class="absolute inset-0 pointer-events-none opacity-5" style="background-image: radial-gradient(#1a1c1c 2px, transparent 2px); background-size: 24px 24px;"></div>
       
       <section class="w-[400px] brutal-border-r bg-surface-container-lowest overflow-y-auto z-10 flex flex-col shrink-0 h-screen">
-        <div class="sticky top-0 bg-surface-container-lowest p-gutter brutal-border-b z-20 flex justify-between items-center">
-          <h2 class="font-headline-lg font-extrabold uppercase text-on-surface flex items-center gap-2">
-            <span class="material-symbols-outlined text-primary text-4xl" data-icon="local_fire_department" data-weight="fill" style="font-variation-settings: 'FILL' 1;">local_fire_department</span>
-            HOT JOBS
-          </h2>
-          <div class="bg-secondary text-on-secondary font-label-bold text-label-bold brutal-border px-3 py-1 brutal-shadow">LIVE</div>
+        <div class="sticky top-0 bg-surface-container-lowest p-gutter brutal-border-b z-20 flex flex-col gap-4">
+          <div class="flex justify-between items-center">
+            <h2 class="font-headline-lg font-extrabold uppercase text-on-surface flex items-center gap-2">
+              <span class="material-symbols-outlined text-primary text-4xl" data-icon="local_fire_department" data-weight="fill" style="font-variation-settings: 'FILL' 1;">local_fire_department</span>
+              HOT JOBS
+            </h2>
+            <div class="bg-secondary text-on-secondary font-label-bold text-label-bold brutal-border px-3 py-1 brutal-shadow">LIVE</div>
+          </div>
+          
+          <div class="flex gap-2 w-full">
+            <input 
+              v-model="scrapeUrl" 
+              @keyup.enter="triggerScrape"
+              class="flex-1 bg-surface brutal-border px-3 py-2 font-code-sm text-code-sm text-on-surface brutal-shadow-sm brutal-input placeholder-tertiary outline-none" 
+              placeholder="Paste Job URL..." 
+              type="url"
+              :disabled="isScraping"
+            />
+            <button 
+              @click="triggerScrape" 
+              :disabled="isScraping"
+              class="bg-primary text-on-primary brutal-border p-2 brutal-shadow-sm brutal-button hover:bg-surface-tint transition-colors disabled:opacity-50 flex items-center justify-center min-w-[48px]" 
+              title="Scrape Data"
+            >
+              <span v-if="!isScraping" class="material-symbols-outlined text-xl" data-icon="radar">radar</span>
+              <span v-else class="material-symbols-outlined text-xl animate-spin" data-icon="sync">sync</span>
+            </button>
+          </div>
         </div>
+
         <div class="p-gutter flex flex-col gap-6">
-          <article class="bg-surface brutal-border brutal-shadow p-6 relative group transition-transform hover:-translate-y-1">
-            <div class="absolute top-0 right-0 bg-primary text-on-primary font-code-sm text-code-sm px-3 py-1 brutal-border-l brutal-border-b font-bold tracking-widest uppercase">URGENT</div>
-            <div class="mb-4">
-              <span class="inline-block bg-secondary-container text-on-secondary-container font-label-bold text-label-bold px-2 py-1 brutal-border mb-2">ENG-04</span>
-              <h3 class="font-headline-md text-headline-md font-bold uppercase leading-tight mb-1">Senior UI Dev</h3>
-              <p class="font-body-md text-body-md text-tertiary">Fintech Stealth Startup</p>
+          <article 
+            v-for="job in hotJobs" 
+            :key="job.id"
+            class="bg-surface brutal-border brutal-shadow p-6 relative group transition-transform hover:-translate-y-1"
+          >
+            <div :class="['absolute top-0 right-0 font-code-sm text-code-sm px-3 py-1 brutal-border-l brutal-border-b font-bold tracking-widest uppercase', job.status_color]">
+              {{ job.status_label }}
             </div>
+            <div class="mb-4 pr-16">
+              <span class="inline-block bg-surface-container-high text-on-surface font-code-sm text-code-sm px-2 py-1 brutal-border mb-2 font-bold">{{ job.id }}</span>
+              <h3 class="font-headline-md text-headline-md font-bold uppercase leading-tight mb-1">{{ job.job_title }}</h3>
+              <p class="font-body-md text-body-md text-tertiary">{{ job.company_name }}</p>
+              
+              <div v-if="job.target_email" class="mt-2 inline-flex items-center gap-1 bg-[#e1ec3a] text-[#1a1c1c] text-xs font-bold px-2 py-1 brutal-border border-2">
+                <span class="material-symbols-outlined text-[14px]" data-icon="mail">mail</span> EMAIL FOUND
+              </div>
+            </div>
+            
             <div class="brutal-border-t pt-4 flex justify-between items-end">
               <div>
                 <div class="font-code-sm text-code-sm text-on-surface font-bold uppercase mb-1">Match Score</div>
-                <div class="font-headline-md text-headline-md text-primary font-black">94%</div>
+                <div class="font-headline-md text-headline-md text-primary font-black">{{ job.match_score }}%</div>
               </div>
-              <button class="bg-surface text-on-surface brutal-border p-2 brutal-shadow brutal-button hover:bg-secondary transition-colors" title="Load Lead">
-                <span class="material-symbols-outlined" data-icon="arrow_forward">arrow_forward</span>
-              </button>
-            </div>
-          </article>
-          <article class="bg-surface brutal-border brutal-shadow p-6 relative group transition-transform hover:-translate-y-1">
-            <div class="mb-4">
-              <span class="inline-block bg-surface-dim text-on-surface font-label-bold text-label-bold px-2 py-1 brutal-border mb-2">MKT-12</span>
-              <h3 class="font-headline-md text-headline-md font-bold uppercase leading-tight mb-1">Growth Hacker</h3>
-              <p class="font-body-md text-body-md text-tertiary">SaaS Scale-up (B2B)</p>
-            </div>
-            <div class="brutal-border-t pt-4 flex justify-between items-end">
-              <div>
-                <div class="font-code-sm text-code-sm text-on-surface font-bold uppercase mb-1">Match Score</div>
-                <div class="font-headline-md text-headline-md text-on-surface font-black">88%</div>
-              </div>
-              <button class="bg-surface text-on-surface brutal-border p-2 brutal-shadow brutal-button hover:bg-secondary transition-colors" title="Load Lead">
-                <span class="material-symbols-outlined" data-icon="arrow_forward">arrow_forward</span>
-              </button>
-            </div>
-          </article>
-          <article class="bg-surface brutal-border brutal-shadow p-6 relative group transition-transform hover:-translate-y-1 opacity-70">
-            <div class="mb-4">
-              <span class="inline-block bg-surface-dim text-on-surface font-label-bold text-label-bold px-2 py-1 brutal-border mb-2">SLS-88</span>
-              <h3 class="font-headline-md text-headline-md font-bold uppercase leading-tight mb-1">Outbound AE</h3>
-              <p class="font-body-md text-body-md text-tertiary">Cybersecurity</p>
-            </div>
-            <div class="brutal-border-t pt-4 flex justify-between items-end">
-              <div>
-                <div class="font-code-sm text-code-sm text-on-surface font-bold uppercase mb-1">Match Score</div>
-                <div class="font-headline-md text-headline-md text-tertiary font-black">72%</div>
-              </div>
-              <button class="bg-surface text-on-surface brutal-border p-2 brutal-shadow brutal-button hover:bg-secondary transition-colors" title="Load Lead">
+              <button 
+                @click="loadLeadToForm(job)"
+                class="bg-surface text-on-surface brutal-border p-2 brutal-shadow brutal-button hover:bg-secondary hover:text-on-secondary transition-colors" 
+                title="Load Lead"
+              >
                 <span class="material-symbols-outlined" data-icon="arrow_forward">arrow_forward</span>
               </button>
             </div>
