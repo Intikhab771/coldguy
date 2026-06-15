@@ -20,6 +20,8 @@ load_dotenv()
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 queue = asyncio.Queue()
+# A tripwire to wake up the scheduler instantly if settings change
+frequency_event = asyncio.Event()
 
 class JobApplicationData(BaseModel):
     job_title: str
@@ -96,33 +98,43 @@ async def email_worker():
         finally:
             queue.task_done()
 
-# 2. THE CLOCK (Upgraded to 1-Second Ticks for Dynamic Syncing)
+# 2. THE CLOCK (Optimized Event-Driven Scheduler)
 async def campaign_scheduler():
-    print("⏰ Automation Clock Online...")
-    time_elapsed = 0
+    print("⏰ Automation Clock Online (Event-Driven)...")
+    
     while True:
         if GLOBAL_STATE["is_auto_mode"] and GLOBAL_STATE["saved_campaign"]:
             # Auto-kill if target was reached externally
             if GLOBAL_STATE["emails_sent"] >= GLOBAL_STATE["total_target"]:
                 GLOBAL_STATE["is_auto_mode"] = False
-                time_elapsed = 0
                 await asyncio.sleep(1)
                 continue
 
-            # Trigger only when elapsed time catches up to the CURRENT dynamic frequency
-            if time_elapsed >= GLOBAL_STATE["frequency"]:
-                print(f"⏳ CLOCK TRIGGERED! Injecting emails into the queue.")
-                for order in GLOBAL_STATE["saved_campaign"]:
-                    # Prevent over-queueing beyond the target
-                    if GLOBAL_STATE["emails_sent"] + queue.qsize() < GLOBAL_STATE["total_target"]:
-                        await queue.put(order)
-                time_elapsed = 0
-            else:
-                time_elapsed += 1
-                await asyncio.sleep(1)
+            # 1. Fire the emails
+            print("⏳ CLOCK TRIGGERED! Injecting emails into the queue.")
+            for order in GLOBAL_STATE["saved_campaign"]:
+                if GLOBAL_STATE["emails_sent"] + queue.qsize() < GLOBAL_STATE["total_target"]:
+                    await queue.put(order)
+            
+            # 2. Go to deep sleep for the exact frequency duration
+            try:
+                # wait_for will pause completely for GLOBAL_STATE["frequency"] seconds.
+                # IF frequency_event is triggered before time runs out, it wakes up instantly.
+                await asyncio.wait_for(frequency_event.wait(), timeout=GLOBAL_STATE["frequency"])
+                
+                # If we reach this line, it means the user moved the slider and tripped the wire.
+                # We clear the wire and loop back to adjust to the new reality.
+                print("⚡ Scheduler interrupted by live setting change! Recalculating...")
+                frequency_event.clear()
+                
+            except asyncio.TimeoutError:
+                # If we get a TimeoutError, it means the wire was NOT tripped, 
+                # and the full frequency time elapsed naturally. Time to loop and fire again!
+                pass
+                
         else:
-            time_elapsed = 0
-            await asyncio.sleep(1)
+            # If auto-mode is off, check again in a bit
+            await asyncio.sleep(2)
 
 # 3. STARTUP MANAGER
 @asynccontextmanager
@@ -144,6 +156,10 @@ app.add_middleware(
 async def update_frequency(frequency: int = Form(...)):
     GLOBAL_STATE["frequency"] = frequency
     print(f"🎚️ Live Frequency Update: {frequency}s")
+    
+    # Trip the wire! Wake the scheduler up instantly to apply the new time.
+    frequency_event.set() 
+    
     return {"status": "Success", "frequency": GLOBAL_STATE["frequency"]}
 
 # --- STATUS ENDPOINT ---
